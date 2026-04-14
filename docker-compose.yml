@@ -23,7 +23,16 @@ services:
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"
+  redis:
+    image: redis:7-alpine
+    container_name: errhub-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
 
 volumes:
   postgres_data:
   minio_data:
+  redis_data:
