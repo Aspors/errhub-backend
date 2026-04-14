@@ -11,6 +11,8 @@ import (
 type Config struct {
 	Port        string
 	DatabaseURL string 
+	RedisAddr   string 
+	RedisPass   string 
 }
 
 func LoadEnv() *Config {
@@ -34,8 +36,16 @@ func LoadEnv() *Config {
 
 	dbURL := fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=disable", dbUser, dbPass, dbHost, dbName)
 
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	redisPass := os.Getenv("REDIS_PASSWORD")
+
 	return &Config{
 		Port:        port,
 		DatabaseURL: dbURL,
+		RedisAddr:   redisAddr,
+		RedisPass:   redisPass,
 	}
 }

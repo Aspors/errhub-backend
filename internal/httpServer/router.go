@@ -5,6 +5,7 @@ import (
 
 	"github.com/Aspors/errhub-backend/internal/httpserver/handler"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -22,10 +23,10 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func NewRouter(db *pgxpool.Pool) http.Handler {
+func NewRouter(db *pgxpool.Pool, rdb *redis.Client) http.Handler {
 	mux := http.NewServeMux()
 
-	eventHandler := handler.NewEventHandler(db)
+	eventHandler := handler.NewEventHandler(db, rdb)
 
 	mux.HandleFunc("GET /health", handler.Health)
 
