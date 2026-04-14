@@ -6,14 +6,17 @@ import (
 	"net/http"
 
 	"github.com/Aspors/errhub-backend/internal/models"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type EventHandler struct {
-	//TODO: Позже здесь появится db *pgxpool.Pool
+	db *pgxpool.Pool
 }
 
-func NewEventHandler() *EventHandler {
-	return &EventHandler{}
+func NewEventHandler(db *pgxpool.Pool) *EventHandler {
+	return &EventHandler{
+		db: db,
+	}
 }
 
 func (h *EventHandler) Capture(w http.ResponseWriter, r *http.Request) {
@@ -24,6 +27,22 @@ func (h *EventHandler) Capture(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		log.Printf("Failed to decode payload: %v", err)
 		http.Error(w, "Bad Request: invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Failed to marshal payload to JSON: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	query := `INSERT INTO events (project_id, payload) VALUES ($1, $2)`
+	
+	_, err = h.db.Exec(r.Context(), query, payload.ProjectID, payloadBytes)
+	if err != nil {
+		log.Printf("Database insert error: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 

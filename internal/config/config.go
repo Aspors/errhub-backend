@@ -32,7 +32,7 @@ func LoadEnv() *Config {
 		dbHost = "localhost"
 	}
 
-	dbURL := fmt.Sprintf("postgres://%s:%s@%s:5432/%s", dbUser, dbPass, dbHost, dbName)
+	dbURL := fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=disable", dbUser, dbPass, dbHost, dbName)
 
 	return &Config{
 		Port:        port,
