@@ -1,13 +1,10 @@
-package httpServer
+package httpserver
 
 import (
 	"context"
 	"errors"
 	"log"
 	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 )
 
@@ -15,40 +12,42 @@ type Server struct {
 	httpServer *http.Server
 }
 
-func New(handler http.Handler, port string) *Server{
-	return  &Server{
+func New(handler http.Handler, port string) *Server {
+	return &Server{
 		httpServer: &http.Server{
-			Addr: ":" + port,
-			Handler: handler,
+			Addr:         ":" + port,
+			Handler:      handler,
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			IdleTimeout:  60 * time.Second,
 		},
 	}
 }
 
-func (s *Server) Run() error {
-	go func() {
-		log.Println("server started on", s.httpServer.Addr)
+func (s *Server) Run(ctx context.Context) error {
+	serverError := make(chan error, 1)
 
-		if err := s.httpServer.ListenAndServe(); err != nil &&
-			!errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("listen error: %v", err)
+	go func() {
+		log.Printf("Server started on %s", s.httpServer.Addr)
+		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverError <- err
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	<-stop
-	log.Println("Shutdown signal received")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
-	defer cancel()
-
-	if err := s.httpServer.Shutdown(ctx); err != nil {
-		return  err;
+	select {
+	case err := <-serverError:
+		return err
+	case <-ctx.Done():
+		log.Println("Shutdown signal received")
 	}
 
-	log.Println("Server stopped")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
+	if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+		return err
+	}
+
+	log.Println("Server gracefully stopped")
 	return nil
 }
