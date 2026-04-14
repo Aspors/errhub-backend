@@ -18,7 +18,7 @@ func main() {
 	cfg := config.LoadEnv()
 
 	router := httpserver.NewRouter()
-	server := httpserver.New(router, cfg.PORT)
+	server := httpserver.New(router, cfg.Port)
 
 	if err := server.Run(ctx); err != nil{
 		log.Fatal(err)
