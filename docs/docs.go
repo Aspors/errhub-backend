@@ -126,6 +126,20 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/auth/logout": {
+            "post": {
+                "description": "Clears the auth cookie.",
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Logout",
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    }
+                }
+            }
+        },
         "/api/events": {
             "post": {
                 "description": "Accepts an error event from the errhub-package SDK. The payload is validated immediately and processed asynchronously by a worker pool. No authentication required — the project_id in the payload must match an existing project UUID.",
@@ -675,10 +689,6 @@ const docTemplate = `{
         "handler.AuthResponse": {
             "type": "object",
             "properties": {
-                "token": {
-                    "type": "string",
-                    "example": "eyJhbGci..."
-                },
                 "user": {
                     "$ref": "#/definitions/models.User"
                 }

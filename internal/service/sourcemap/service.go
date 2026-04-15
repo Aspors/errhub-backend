@@ -16,7 +16,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var stackRegex = regexp.MustCompile(`([^/]+\.[a-z0-9]+\.js|index\.[a-z0-9]+\.js|[^/]+\.js):(\d+):(\d+)`)
+// Matches optional http(s)://host/path/ prefix, then filename.js:line:col
+var stackRegex = regexp.MustCompile(`(?:https?://[^\s)]*?/)?([^/\s()]+\.js):(\d+):(\d+)`)
 
 type Service struct {
 	s3    *s3.Storage
@@ -33,7 +34,7 @@ func New(storage *s3.Storage, db *pgxpool.Pool) *Service {
 // source positions. release is the build version string from the EventPayload;
 // if empty, falls back to the legacy flat path layout.
 func (s *Service) ProcessStack(ctx context.Context, projectID, release, stack string) string {
-	return stackRegex.ReplaceAllStringFunc(stack, func(match string) string {
+	resolved := stackRegex.ReplaceAllStringFunc(stack, func(match string) string {
 		parts := stackRegex.FindStringSubmatch(match)
 		if len(parts) < 4 {
 			return match
@@ -61,10 +62,13 @@ func (s *Service) ProcessStack(ctx context.Context, projectID, release, stack st
 			res, err = s.resolve(ctx, legacyKey, projectID, "", mapFilename, line, col)
 		}
 		if err != nil {
+			log.Printf("sourcemap: failed to resolve %s (project=%s release=%q): %v", match, projectID, release, err)
 			return match
 		}
 		return res
 	})
+
+	return resolved
 }
 
 func (s *Service) resolve(ctx context.Context, objectKey, projectID, release, mapFile string, line, col int) (string, error) {
@@ -100,10 +104,12 @@ func (s *Service) resolve(ctx context.Context, objectKey, projectID, release, ma
 	// Update last_used_at so the cleanup worker knows this map is still active.
 	go s.touchLastUsed(objectKey)
 
+	// Return just the source location so it slots cleanly into the surrounding
+	// "at functionName (<here>)" frame that already exists in the stack string.
 	if fn != "" {
-		return fmt.Sprintf("at %s (%s:%d:%d)", fn, file, l, c), nil
+		return fmt.Sprintf("%s:%d:%d [%s]", file, l, c, fn), nil
 	}
-	return fmt.Sprintf("at %s:%d:%d", file, l, c), nil
+	return fmt.Sprintf("%s:%d:%d", file, l, c), nil
 }
 
 func (s *Service) touchLastUsed(objectKey string) {

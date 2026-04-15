@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Aspors/errhub-backend/internal/storage/s3"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -49,6 +50,30 @@ type UploadSourcemapResponse struct {
 func (h *SourcemapHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("projectId")
 	release := r.PathValue("release")
+
+	// Authenticate via project API key: Authorization: Bearer <api_key>
+	apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if apiKey == "" {
+		writeError(w, http.StatusUnauthorized, "missing API key")
+		return
+	}
+	var dummy string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT id FROM projects WHERE id = $1 AND api_key = $2`,
+		projectID, apiKey).Scan(&dummy)
+	if err == pgx.ErrNoRows || dummy == "" {
+		writeError(w, http.StatusUnauthorized, "invalid API key")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to verify API key")
+		return
+	}
+
+	if h.storage == nil {
+		writeError(w, http.StatusServiceUnavailable, "source map storage is not configured")
+		return
+	}
 
 	if release == "" {
 		writeError(w, http.StatusBadRequest, "release is required")

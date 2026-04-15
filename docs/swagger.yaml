@@ -1,9 +1,6 @@
 definitions:
   handler.AuthResponse:
     properties:
-      token:
-        example: eyJhbGci...
-        type: string
       user:
         $ref: '#/definitions/models.User'
     type: object
@@ -291,6 +288,15 @@ paths:
           schema:
             $ref: '#/definitions/handler.ErrorResponse'
       summary: Login
+      tags:
+      - auth
+  /api/auth/logout:
+    post:
+      description: Clears the auth cookie.
+      responses:
+        "204":
+          description: No Content
+      summary: Logout
       tags:
       - auth
   /api/events:

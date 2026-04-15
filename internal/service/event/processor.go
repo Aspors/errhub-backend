@@ -86,7 +86,8 @@ func (p *Processor) process(job Job) {
 		ON CONFLICT (project_id, fingerprint)
 		DO UPDATE SET
 			occurrences = issues.occurrences + 1,
-			last_seen   = NOW()
+			last_seen   = NOW(),
+			status      = CASE WHEN issues.status = 'resolved' THEN 'open' ELSE issues.status END
 		RETURNING id, occurrences`
 
 	var issueID string

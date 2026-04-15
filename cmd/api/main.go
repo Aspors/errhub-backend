@@ -12,6 +12,7 @@ import (
 	"github.com/Aspors/errhub-backend/internal/httpserver"
 	"github.com/Aspors/errhub-backend/internal/service/cleanup"
 	eventsvc "github.com/Aspors/errhub-backend/internal/service/event"
+	"github.com/Aspors/errhub-backend/internal/service/sourcemap"
 	"github.com/Aspors/errhub-backend/internal/storage/postgres"
 	"github.com/Aspors/errhub-backend/internal/storage/redis"
 	"github.com/Aspors/errhub-backend/internal/storage/s3"
@@ -47,6 +48,7 @@ func main() {
 
 	// MinIO for source map storage.
 	var storage *s3.Storage
+	var srcSvc *sourcemap.Service
 	if cfg.MinioEndpoint != "" {
 		minioCtx, minioCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer minioCancel()
@@ -55,6 +57,8 @@ func main() {
 			log.Fatalf("minio initialization failed: %v", err)
 		}
 		log.Println("connected to MinIO")
+
+		srcSvc = sourcemap.New(storage, db.Pool)
 
 		// Start daily cleanup of stale source maps.
 		cleanup.Start(ctx, db.Pool, storage)
@@ -67,7 +71,7 @@ func main() {
 	processor.Start(4)
 	defer processor.Stop() // drains the queue before exit
 
-	router := httpserver.NewRouter(db.Pool, rdb, processor, storage, cfg.JWTSecret, cfg.AdminKey)
+	router := httpserver.NewRouter(db.Pool, rdb, processor, storage, srcSvc, cfg.JWTSecret, cfg.AdminKey, cfg.CORSOrigins)
 	server := httpserver.New(router, cfg.Port)
 
 	if err := server.Run(ctx); err != nil {

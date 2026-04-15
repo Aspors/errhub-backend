@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -19,6 +20,7 @@ type Config struct {
 	MinioAccessKey string
 	MinioSecretKey string
 	MinioBucket    string
+	CORSOrigins    []string
 }
 
 func LoadEnv() *Config {
@@ -63,6 +65,15 @@ func LoadEnv() *Config {
 		minioBucket = "sourcemaps"
 	}
 
+	var corsOrigins []string
+	if raw := os.Getenv("CORS_ORIGINS"); raw != "" {
+		for _, o := range strings.Split(raw, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				corsOrigins = append(corsOrigins, o)
+			}
+		}
+	}
+
 	return &Config{
 		Port:           port,
 		DatabaseURL:    dbURL,
@@ -74,5 +85,6 @@ func LoadEnv() *Config {
 		MinioAccessKey: os.Getenv("MINIO_USER"),
 		MinioSecretKey: os.Getenv("MINIO_PASSWORD"),
 		MinioBucket:    minioBucket,
+		CORSOrigins:    corsOrigins,
 	}
 }

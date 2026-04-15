@@ -5,17 +5,20 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/Aspors/errhub-backend/internal/models"
+	"github.com/Aspors/errhub-backend/internal/service/sourcemap"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type IssueHandler struct {
-	db *pgxpool.Pool
+	db     *pgxpool.Pool
+	srcSvc *sourcemap.Service
 }
 
-func NewIssueHandler(db *pgxpool.Pool) *IssueHandler {
-	return &IssueHandler{db: db}
+func NewIssueHandler(db *pgxpool.Pool, srcSvc *sourcemap.Service) *IssueHandler {
+	return &IssueHandler{db: db, srcSvc: srcSvc}
 }
 
 // IssueListResponse wraps a paginated list of issues.
@@ -147,12 +150,25 @@ func (h *IssueHandler) Get(w http.ResponseWriter, r *http.Request) {
 	events := make([]IssueEventRow, 0)
 	for rows.Next() {
 		var raw []byte
-		var createdAt string
+		var createdAt time.Time
 		if err := rows.Scan(&raw, &createdAt); err != nil {
 			log.Printf("failed to scan event row: %v", err)
 			continue
 		}
-		events = append(events, IssueEventRow{Payload: json.RawMessage(raw), CreatedAt: createdAt})
+
+		// Resolve minified stacktrace to original source positions if source maps are available.
+		if h.srcSvc != nil {
+			var payload models.EventPayload
+			if err := json.Unmarshal(raw, &payload); err == nil && payload.Error.Stacktrace != "" {
+				resolved := h.srcSvc.ProcessStack(r.Context(), projectID, payload.Release, payload.Error.Stacktrace)
+				payload.Error.Stacktrace = resolved
+				if reencoded, err := json.Marshal(payload); err == nil {
+					raw = reencoded
+				}
+			}
+		}
+
+		events = append(events, IssueEventRow{Payload: json.RawMessage(raw), CreatedAt: createdAt.UTC().Format(time.RFC3339)})
 	}
 
 	writeJSON(w, http.StatusOK, IssueDetailResponse{Issue: issue, Events: events})
