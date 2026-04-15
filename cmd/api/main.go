@@ -10,43 +10,67 @@ import (
 
 	"github.com/Aspors/errhub-backend/internal/config"
 	"github.com/Aspors/errhub-backend/internal/httpserver"
+	"github.com/Aspors/errhub-backend/internal/service/cleanup"
+	eventsvc "github.com/Aspors/errhub-backend/internal/service/event"
 	"github.com/Aspors/errhub-backend/internal/storage/postgres"
 	"github.com/Aspors/errhub-backend/internal/storage/redis"
+	"github.com/Aspors/errhub-backend/internal/storage/s3"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()  
+	defer stop()
 
 	cfg := config.LoadEnv()
 
-	dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer dbCancel()
-
 	db, err := postgres.New(dbCtx, cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("Database initialization failed: %v", err)
+		log.Fatalf("database initialization failed: %v", err)
 	}
 	defer db.Close()
-	
+
 	if err := db.RunMigrations(cfg.DatabaseURL); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
+		log.Fatalf("failed to run migrations: %v", err)
 	}
+	log.Println("connected to PostgreSQL")
 
-	log.Println("Successfully connected to PostgreSQL!")
-
-	rdb, err := redis.New(dbCtx, cfg.RedisAddr, cfg.RedisPass)
+	redisCtx, redisCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer redisCancel()
+	rdb, err := redis.New(redisCtx, cfg.RedisAddr, cfg.RedisPass)
 	if err != nil {
-		log.Fatalf("Redis initialization failed: %v", err)
+		log.Fatalf("redis initialization failed: %v", err)
 	}
 	defer rdb.Close()
+	log.Println("connected to Redis")
 
-	log.Println("Successfully connected to Redis!")
+	// MinIO for source map storage.
+	var storage *s3.Storage
+	if cfg.MinioEndpoint != "" {
+		minioCtx, minioCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer minioCancel()
+		storage, err = s3.New(minioCtx, cfg.MinioEndpoint, cfg.MinioAccessKey, cfg.MinioSecretKey, cfg.MinioBucket)
+		if err != nil {
+			log.Fatalf("minio initialization failed: %v", err)
+		}
+		log.Println("connected to MinIO")
 
-	router := httpserver.NewRouter(db.Pool, rdb)
+		// Start daily cleanup of stale source maps.
+		cleanup.Start(ctx, db.Pool, storage)
+	} else {
+		log.Println("MINIO_ENDPOINT not set; source map features disabled")
+	}
+
+	// Start async event processor: 500-event buffer, 4 worker goroutines.
+	processor := eventsvc.NewProcessor(db.Pool, rdb, 500)
+	processor.Start(4)
+	defer processor.Stop() // drains the queue before exit
+
+	router := httpserver.NewRouter(db.Pool, rdb, processor, storage, cfg.JWTSecret, cfg.AdminKey)
 	server := httpserver.New(router, cfg.Port)
 
-	if err := server.Run(ctx); err != nil{
+	if err := server.Run(ctx); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -1,0 +1,659 @@
+definitions:
+  handler.AuthResponse:
+    properties:
+      token:
+        example: eyJhbGci...
+        type: string
+      user:
+        $ref: '#/definitions/models.User'
+    type: object
+  handler.CaptureResponse:
+    properties:
+      status:
+        example: captured
+        type: string
+    type: object
+  handler.CreateProjectRequest:
+    properties:
+      name:
+        example: My React App
+        type: string
+    type: object
+  handler.CreateUserRequest:
+    properties:
+      email:
+        example: dev@company.com
+        type: string
+      password:
+        example: supersecret123
+        type: string
+    type: object
+  handler.DateCount:
+    properties:
+      count:
+        example: 42
+        type: integer
+      date:
+        example: "2024-01-15"
+        type: string
+    type: object
+  handler.ErrorResponse:
+    properties:
+      error:
+        example: invalid JSON
+        type: string
+    type: object
+  handler.IssueDetailResponse:
+    properties:
+      events:
+        items:
+          $ref: '#/definitions/handler.IssueEventRow'
+        type: array
+      issue:
+        $ref: '#/definitions/models.Issue'
+    type: object
+  handler.IssueEventRow:
+    properties:
+      created_at:
+        example: "2024-01-15T10:30:00Z"
+        type: string
+      payload: {}
+    type: object
+  handler.IssueListResponse:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/models.Issue'
+        type: array
+      limit:
+        example: 50
+        type: integer
+      offset:
+        example: 0
+        type: integer
+      total:
+        example: 143
+        type: integer
+    type: object
+  handler.LoginRequest:
+    properties:
+      email:
+        example: dev@company.com
+        type: string
+      password:
+        example: supersecret
+        type: string
+    type: object
+  handler.StatsResponse:
+    properties:
+      by_date:
+        items:
+          $ref: '#/definitions/handler.DateCount'
+        type: array
+      by_level:
+        additionalProperties:
+          format: int64
+          type: integer
+        type: object
+      total_issues:
+        example: 15
+        type: integer
+      total_occurrences:
+        example: 59
+        type: integer
+    type: object
+  handler.UpdateStatusRequest:
+    properties:
+      status:
+        enum:
+        - open
+        - resolved
+        - ignored
+        example: resolved
+        type: string
+    type: object
+  handler.UploadSourcemapResponse:
+    properties:
+      filename:
+        example: index-abc123.js.map
+        type: string
+      object_key:
+        example: proj-uuid/a3f9c2b/index-abc123.js.map
+        type: string
+      release:
+        example: a3f9c2b
+        type: string
+    type: object
+  models.Breadcrumb:
+    properties:
+      message:
+        type: string
+      metadata:
+        additionalProperties: true
+        type: object
+      timestamp:
+        type: string
+      type:
+        type: string
+    type: object
+  models.ContextData:
+    properties:
+      framework:
+        type: string
+      url:
+        type: string
+      user_agent:
+        type: string
+    type: object
+  models.ErrorDetail:
+    properties:
+      message:
+        type: string
+      stacktrace:
+        type: string
+      type:
+        type: string
+    type: object
+  models.EventPayload:
+    properties:
+      breadcrumbs:
+        items:
+          $ref: '#/definitions/models.Breadcrumb'
+        type: array
+      context:
+        $ref: '#/definitions/models.ContextData'
+      error:
+        $ref: '#/definitions/models.ErrorDetail'
+      level:
+        type: string
+      project_id:
+        type: string
+      release:
+        description: git commit hash, set automatically by SDK via build-time env
+        type: string
+    type: object
+  models.Issue:
+    properties:
+      error_message:
+        type: string
+      error_type:
+        type: string
+      fingerprint:
+        type: string
+      first_seen:
+        type: string
+      id:
+        type: string
+      last_seen:
+        type: string
+      level:
+        type: string
+      occurrences:
+        type: integer
+      project_id:
+        type: string
+      status:
+        type: string
+    type: object
+  models.Project:
+    properties:
+      api_key:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  models.User:
+    properties:
+      created_at:
+        type: string
+      email:
+        type: string
+      id:
+        type: string
+    type: object
+info:
+  contact: {}
+paths:
+  /api/admin/users:
+    post:
+      consumes:
+      - application/json
+      description: Manually provision a new user account. Access is granted by the
+        admin, not via self-registration. Requires X-Admin-Key header.
+      parameters:
+      - description: Admin key from ADMIN_KEY env var
+        in: header
+        name: X-Admin-Key
+        required: true
+        type: string
+      - description: New user credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.CreateUserRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.User'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "403":
+          description: invalid or missing admin key
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "409":
+          description: email already registered
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Create user
+      tags:
+      - admin
+  /api/auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticate with email and password. Returns a JWT valid for 24
+        hours.
+      parameters:
+      - description: Credentials
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.AuthResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: invalid email or password
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Login
+      tags:
+      - auth
+  /api/events:
+    post:
+      consumes:
+      - application/json
+      description: Accepts an error event from the errhub-package SDK. The payload
+        is validated immediately and processed asynchronously by a worker pool. No
+        authentication required — the project_id in the payload must match an existing
+        project UUID.
+      parameters:
+      - description: Error event payload
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/models.EventPayload'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Accepted
+          schema:
+            $ref: '#/definitions/handler.CaptureResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "422":
+          description: validation error
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      summary: Capture error event
+      tags:
+      - events
+  /api/projects:
+    get:
+      description: Returns all projects visible to authenticated users (company-wide).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Project'
+            type: array
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List projects
+      tags:
+      - projects
+    post:
+      consumes:
+      - application/json
+      description: Creates a new project and generates an API key. The returned `id`
+        is what the errhub-package SDK uses as `projectId`.
+      parameters:
+      - description: Project details
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.CreateProjectRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Project'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Create project
+      tags:
+      - projects
+  /api/projects/{projectId}:
+    delete:
+      description: Permanently deletes a project and all its issues and events (cascade).
+      parameters:
+      - description: Project UUID
+        in: path
+        name: projectId
+        required: true
+        type: string
+      responses:
+        "204":
+          description: No Content
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Delete project
+      tags:
+      - projects
+    get:
+      description: Returns a single project by ID.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: projectId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Project'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get project
+      tags:
+      - projects
+  /api/projects/{projectId}/issues:
+    get:
+      description: Returns a paginated list of deduplicated issues for a project,
+        ordered by last_seen descending. Each item includes the occurrence counter
+        so the frontend can show "occurred N times".
+      parameters:
+      - description: Project UUID
+        in: path
+        name: projectId
+        required: true
+        type: string
+      - description: Max results (default 50, max 200)
+        in: query
+        name: limit
+        type: integer
+      - description: Pagination offset (default 0)
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.IssueListResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: List issues
+      tags:
+      - issues
+  /api/projects/{projectId}/issues/{issueId}:
+    get:
+      description: Returns issue details and the last 10 raw event payloads that caused
+        it.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: projectId
+        required: true
+        type: string
+      - description: Issue UUID
+        in: path
+        name: issueId
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.IssueDetailResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Get issue
+      tags:
+      - issues
+    patch:
+      consumes:
+      - application/json
+      description: Changes the status of an issue. Use "resolved" to mark it fixed,
+        "ignored" to suppress it, or "open" to reopen.
+      parameters:
+      - description: Project UUID
+        in: path
+        name: projectId
+        required: true
+        type: string
+      - description: Issue UUID
+        in: path
+        name: issueId
+        required: true
+        type: string
+      - description: New status
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/handler.UpdateStatusRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Issue'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Update issue status
+      tags:
+      - issues
+  /api/projects/{projectId}/releases/{release}/sourcemaps:
+    post:
+      consumes:
+      - multipart/form-data
+      description: Uploads a `.map` file for a specific build release. Called automatically
+        from CI after `npm run build`. The release string is typically the short git
+        commit hash (`$GITHUB_SHA` or `git rev-parse --short HEAD`). Files are stored
+        in MinIO and tracked in the DB for automatic retention management (deleted
+        after 3 days of no use).
+      parameters:
+      - description: Project UUID
+        in: path
+        name: projectId
+        required: true
+        type: string
+      - description: Build release string (e.g. git commit hash)
+        in: path
+        name: release
+        required: true
+        type: string
+      - description: Source map file (.map)
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/handler.UploadSourcemapResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "422":
+          description: only .map files accepted
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Upload source map
+      tags:
+      - sourcemaps
+  /api/projects/{projectId}/stats:
+    get:
+      description: 'Returns aggregated error statistics for a project. Used to render
+        charts on the dashboard. Three queries (by_date, by_level, totals) run in
+        parallel goroutines. Default range: last 30 days.'
+      parameters:
+      - description: Project UUID
+        in: path
+        name: projectId
+        required: true
+        type: string
+      - description: 'Start date inclusive (YYYY-MM-DD). Default: 30 days ago'
+        in: query
+        name: from
+        type: string
+      - description: 'End date inclusive (YYYY-MM-DD). Default: today'
+        in: query
+        name: to
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/handler.StatsResponse'
+        "400":
+          description: invalid date format
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/handler.ErrorResponse'
+      security:
+      - BearerAuth: []
+      summary: Project stats
+      tags:
+      - stats
+swagger: "2.0"

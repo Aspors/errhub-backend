@@ -1,0 +1,3 @@
+ALTER TABLE events DROP COLUMN IF EXISTS issue_id;
+
+DROP TABLE IF EXISTS issues;
