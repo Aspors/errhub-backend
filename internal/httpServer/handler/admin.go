@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"crypto/subtle"
 	"log"
 	"net/http"
 	"strings"
@@ -16,6 +17,9 @@ type AdminHandler struct {
 }
 
 func NewAdminHandler(db *pgxpool.Pool, adminKey string) *AdminHandler {
+	if adminKey == "" {
+		log.Fatal("ADMIN_KEY is not set — server cannot start without it")
+	}
 	return &AdminHandler{db: db, adminKey: adminKey}
 }
 
@@ -25,13 +29,13 @@ type CreateUserRequest struct {
 	Password string `json:"password" example:"supersecret123"`
 }
 
-func (h *AdminHandler) adminKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
+func (h *AdminHandler) AdminKeyMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("X-Admin-Key")
 		if key == "" {
 			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		}
-		if key != h.adminKey || h.adminKey == "" {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(h.adminKey)) != 1 {
 			writeError(w, http.StatusForbidden, "invalid or missing admin key")
 			return
 		}
@@ -55,45 +59,45 @@ func (h *AdminHandler) adminKeyMiddleware(next http.HandlerFunc) http.HandlerFun
 //	@Failure     422         {object} ErrorResponse
 //	@Router      /api/admin/users [post]
 func (h *AdminHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
-	h.adminKeyMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		var req CreateUserRequest
-		if err := decodeJSON(r, &req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON")
-			return
-		}
-		if req.Email == "" || req.Password == "" {
-			writeError(w, http.StatusUnprocessableEntity, "email and password are required")
-			return
-		}
-		if len(req.Password) < 8 {
-			writeError(w, http.StatusUnprocessableEntity, "password must be at least 8 characters")
-			return
-		}
+	var req CreateUserRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.Email == "" || req.Password == "" {
+		writeError(w, http.StatusUnprocessableEntity, "email and password are required")
+		return
+	}
+	if len(req.Password) < 8 {
+		writeError(w, http.StatusUnprocessableEntity, "password must be at least 8 characters")
+		return
+	}
 
-		hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-		if err != nil {
-			log.Printf("bcrypt error: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to create user")
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("bcrypt error: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to create user")
+		return
+	}
+
+	var user models.User
+	query := `
+		INSERT INTO users (email, password_hash)
+		VALUES ($1, $2)
+		RETURNING id, email, created_at`
+	err = h.db.QueryRow(r.Context(), query, req.Email, string(hash)).
+		Scan(&user.ID, &user.Email, &user.CreatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "email already registered")
 			return
 		}
+		log.Printf("failed to create user: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to create user")
+		return
+	}
 
-		var user models.User
-		query := `
-			INSERT INTO users (email, password_hash)
-			VALUES ($1, $2)
-			RETURNING id, email, created_at`
-		err = h.db.QueryRow(r.Context(), query, req.Email, string(hash)).
-			Scan(&user.ID, &user.Email, &user.CreatedAt)
-		if err != nil {
-			if isUniqueViolation(err) {
-				writeError(w, http.StatusConflict, "email already registered")
-				return
-			}
-			log.Printf("failed to create user: %v", err)
-			writeError(w, http.StatusInternalServerError, "failed to create user")
-			return
-		}
-
-		writeJSON(w, http.StatusCreated, user)
-	})(w, r)
+	writeJSON(w, http.StatusCreated, user)
 }

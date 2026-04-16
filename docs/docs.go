@@ -768,7 +768,12 @@ const docTemplate = `{
                     "type": "string",
                     "example": "2024-01-15T10:30:00Z"
                 },
-                "payload": {}
+                "payload": {
+                    "type": "object"
+                },
+                "resolved_stack": {
+                    "type": "string"
+                }
             }
         },
         "handler.IssueListResponse": {

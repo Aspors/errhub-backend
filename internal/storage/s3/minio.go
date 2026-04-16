@@ -37,9 +37,8 @@ func New(ctx context.Context, endpoint, accessKey, secretKey, bucket string) (*S
 	return &Storage{client: mc, bucketName: bucket}, nil
 }
 
-func (s *Storage) Upload(ctx context.Context, projectID, filename string, r io.Reader, size int64) error {
-	objectName := fmt.Sprintf("%s/%s", projectID, filename)
-	_, err := s.client.PutObject(ctx, s.bucketName, objectName, r, size, minio.PutObjectOptions{
+func (s *Storage) Upload(ctx context.Context, objectKey string, r io.Reader, size int64) error {
+	_, err := s.client.PutObject(ctx, s.bucketName, objectKey, r, size, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
 	})
 	return err

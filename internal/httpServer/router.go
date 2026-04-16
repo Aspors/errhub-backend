@@ -86,7 +86,7 @@ func NewRouter(
 	mux.HandleFunc("POST /api/auth/logout", authHandler.Logout)
 
 	// Admin — requires X-Admin-Key header
-	mux.HandleFunc("POST /api/admin/users", adminHandler.CreateUser)
+	mux.HandleFunc("POST /api/admin/users", adminHandler.AdminKeyMiddleware(adminHandler.CreateUser))
 
 	// Event ingestion — public, SDK does not send auth headers
 	mux.HandleFunc("POST /api/events", eventHandler.Capture)

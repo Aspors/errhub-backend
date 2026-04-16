@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/Aspors/errhub-backend/internal/httpserver/middleware"
 	"github.com/Aspors/errhub-backend/internal/models"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -52,6 +54,8 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 
 	var user models.User
 	var passwordHash string
@@ -122,5 +126,6 @@ func (h *AuthHandler) generateToken(userID string) (string, error) {
 
 // isUniqueViolation detects PostgreSQL unique constraint violation (error code 23505).
 func isUniqueViolation(err error) bool {
-	return err != nil && (strings.Contains(err.Error(), "23505") || strings.Contains(err.Error(), "unique"))
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }

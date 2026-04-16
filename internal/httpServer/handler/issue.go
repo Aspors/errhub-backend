@@ -31,7 +31,7 @@ type IssueListResponse struct {
 // ResolvedStack is non-nil when the stack trace has been deobfuscated; the
 // frontend should prefer it over the minified stacktrace inside Payload.
 type IssueEventRow struct {
-	Payload       json.RawMessage `json:"payload"`
+	Payload       json.RawMessage `json:"payload" swaggertype:"object"`
 	ResolvedStack *string         `json:"resolved_stack"`
 	CreatedAt     string          `json:"created_at" example:"2024-01-15T10:30:00Z"`
 }

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -86,48 +87,91 @@ func (h *SourcemapHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit total request body size before touching multipart.
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
-		writeError(w, http.StatusBadRequest, "file too large or invalid multipart form")
-		return
-	}
 
-	file, header, err := r.FormFile("file")
+	// Stream multipart directly — avoids buffering the file to disk/memory.
+	mr, err := r.MultipartReader()
 	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid multipart form")
+		return
+	}
+
+	var (
+		filename  string
+		objectKey string
+		uploaded  bool
+	)
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "failed to read multipart form")
+			return
+		}
+
+		if part.FormName() != "file" {
+			part.Close()
+			continue
+		}
+
+		filename = filepath.Base(part.FileName())
+		if !strings.HasSuffix(filename, ".map") {
+			part.Close()
+			writeError(w, http.StatusUnprocessableEntity, "only .map files are accepted")
+			return
+		}
+
+		objectKey = fmt.Sprintf("%s/%s/%s", projectID, release, filename)
+
+		// size=-1: MinIO uses chunked upload, no full-file buffering required.
+		if err := h.storage.Upload(r.Context(), objectKey, part, -1); err != nil {
+			part.Close()
+			log.Printf("failed to upload source map [key=%s]: %v", objectKey, err)
+			writeError(w, http.StatusInternalServerError, "failed to store source map")
+			return
+		}
+		part.Close()
+		uploaded = true
+		break
+	}
+
+	if !uploaded {
 		writeError(w, http.StatusBadRequest, "missing 'file' field in form")
-		return
-	}
-	defer file.Close()
-
-	filename := filepath.Base(header.Filename)
-	if !strings.HasSuffix(filename, ".map") {
-		writeError(w, http.StatusUnprocessableEntity, "only .map files are accepted")
-		return
-	}
-
-	objectKey := fmt.Sprintf("%s/%s/%s", projectID, release, filename)
-
-	if err := h.storage.Upload(r.Context(), projectID+"/"+release, filename, file, header.Size); err != nil {
-		log.Printf("failed to upload source map [key=%s]: %v", objectKey, err)
-		writeError(w, http.StatusInternalServerError, "failed to store source map")
 		return
 	}
 
 	_, err = h.db.Exec(r.Context(), `
 		INSERT INTO sourcemap_files (project_id, release, object_key, size_bytes)
-		VALUES ($1, $2, $3, $4)
+		VALUES ($1, $2, $3, 0)
 		ON CONFLICT (project_id, object_key) DO UPDATE SET
-			size_bytes   = EXCLUDED.size_bytes,
 			last_used_at = NOW()`,
-		projectID, release, objectKey, header.Size)
+		projectID, release, objectKey)
 	if err != nil {
 		log.Printf("failed to record source map in DB [key=%s]: %v", objectKey, err)
+		// Roll back the MinIO upload so we don't leave an orphaned file.
+		if delErr := h.storage.Delete(r.Context(), objectKey); delErr != nil {
+			log.Printf("WARNING: orphaned file in MinIO [key=%s]: %v", objectKey, delErr)
+		}
+		writeError(w, http.StatusInternalServerError, "failed to record source map")
+		return
 	}
 
 	// Retroactively deobfuscate events that arrived before this source map.
-	// Runs in background to not block the upload response.
+	// Wrapped in panic recovery so a bad source map can't crash the server.
 	if h.srcSvc != nil {
-		go h.srcSvc.ResolveEventsForRelease(projectID, release)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("sourcemap: panic in ResolveEventsForRelease [project=%s release=%s]: %v",
+						projectID, release, r)
+				}
+			}()
+			h.srcSvc.ResolveEventsForRelease(projectID, release)
+		}()
 	}
 
 	writeJSON(w, http.StatusCreated, UploadSourcemapResponse{

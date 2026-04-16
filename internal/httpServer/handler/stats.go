@@ -1,11 +1,12 @@
 package handler
 
 import (
+	"log"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
 )
 
 type StatsHandler struct {
@@ -59,94 +60,70 @@ func (h *StatsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		byLevel          = make(map[string]int64)
 		totalIssues      int64
 		totalOccurrences int64
-		mu               sync.Mutex
-		wg               sync.WaitGroup
-		firstErr         error
 	)
 
-	wg.Add(3)
+	// errgroup cancels the shared context when any goroutine returns an error,
+	// stopping the remaining DB queries immediately.
+	g, ctx := errgroup.WithContext(r.Context())
 
-	go func() {
-		defer wg.Done()
-		rows, err := h.db.Query(r.Context(), `
+	// 1. Events per day (time-series chart).
+	g.Go(func() error {
+		rows, err := h.db.Query(ctx, `
 			SELECT DATE(created_at)::text, COUNT(*)
 			FROM events
 			WHERE project_id = $1 AND created_at >= $2 AND created_at < $3
 			GROUP BY 1 ORDER BY 1`,
 			projectID, from, to)
 		if err != nil {
-			mu.Lock()
-			if firstErr == nil {
-				firstErr = err
-			}
-			mu.Unlock()
-			return
+			return err
 		}
 		defer rows.Close()
-		var result []DateCount
+
 		for rows.Next() {
 			var d DateCount
-			if err := rows.Scan(&d.Date, &d.Count); err == nil {
-				result = append(result, d)
+			if err := rows.Scan(&d.Date, &d.Count); err != nil {
+				continue
 			}
+			byDate = append(byDate, d)
 		}
-		mu.Lock()
-		byDate = result
-		mu.Unlock()
-	}()
+		return rows.Err()
+	})
 
-	go func() {
-		defer wg.Done()
-		rows, err := h.db.Query(r.Context(), `
+	// 2. Occurrences by severity level.
+	g.Go(func() error {
+		rows, err := h.db.Query(ctx, `
 			SELECT level, COALESCE(SUM(occurrences), 0)
-			FROM issues WHERE project_id = $1 GROUP BY level`,
-			projectID)
+			FROM issues
+			WHERE project_id = $1 AND last_seen >= $2 AND first_seen < $3
+			GROUP BY level`,
+			projectID, from, to)
 		if err != nil {
-			mu.Lock()
-			if firstErr == nil {
-				firstErr = err
-			}
-			mu.Unlock()
-			return
+			return err
 		}
 		defer rows.Close()
-		result := make(map[string]int64)
+
 		for rows.Next() {
 			var level string
 			var count int64
-			if err := rows.Scan(&level, &count); err == nil {
-				result[level] = count
+			if err := rows.Scan(&level, &count); err != nil {
+				continue
 			}
+			byLevel[level] = count
 		}
-		mu.Lock()
-		byLevel = result
-		mu.Unlock()
-	}()
+		return rows.Err()
+	})
 
-	go func() {
-		defer wg.Done()
-		var issues, occ int64
-		err := h.db.QueryRow(r.Context(), `
+	// 3. Total issues and occurrences for the period.
+	g.Go(func() error {
+		return h.db.QueryRow(ctx, `
 			SELECT COUNT(*), COALESCE(SUM(occurrences), 0)
-			FROM issues WHERE project_id = $1`,
-			projectID).Scan(&issues, &occ)
-		if err != nil {
-			mu.Lock()
-			if firstErr == nil {
-				firstErr = err
-			}
-			mu.Unlock()
-			return
-		}
-		mu.Lock()
-		totalIssues = issues
-		totalOccurrences = occ
-		mu.Unlock()
-	}()
+			FROM issues
+			WHERE project_id = $1 AND last_seen >= $2 AND first_seen < $3`,
+			projectID, from, to).Scan(&totalIssues, &totalOccurrences)
+	})
 
-	wg.Wait()
-
-	if firstErr != nil {
+	if err := g.Wait(); err != nil {
+		log.Printf("failed to fetch stats [project=%s]: %v", projectID, err)
 		writeError(w, http.StatusInternalServerError, "failed to fetch stats")
 		return
 	}
@@ -168,7 +145,7 @@ func parseDateRange(r *http.Request) (from, to time.Time, err error) {
 	toStr := r.URL.Query().Get("to")
 
 	if fromStr == "" {
-		from = time.Now().AddDate(0, 0, -30)
+		from = time.Now().UTC().AddDate(0, 0, -30)
 	} else {
 		from, err = time.Parse("2006-01-02", fromStr)
 		if err != nil {
@@ -177,7 +154,7 @@ func parseDateRange(r *http.Request) (from, to time.Time, err error) {
 	}
 
 	if toStr == "" {
-		to = time.Now().AddDate(0, 0, 1)
+		to = time.Now().UTC().AddDate(0, 0, 1)
 	} else {
 		to, err = time.Parse("2006-01-02", toStr)
 		if err != nil {
