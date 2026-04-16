@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Aspors/errhub-backend/internal/service/sourcemap"
 	"github.com/Aspors/errhub-backend/internal/storage/s3"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,10 +18,11 @@ const maxUploadSize = 32 << 20 // 32 MB
 type SourcemapHandler struct {
 	db      *pgxpool.Pool
 	storage *s3.Storage
+	srcSvc  *sourcemap.Service
 }
 
-func NewSourcemapHandler(db *pgxpool.Pool, storage *s3.Storage) *SourcemapHandler {
-	return &SourcemapHandler{db: db, storage: storage}
+func NewSourcemapHandler(db *pgxpool.Pool, storage *s3.Storage, srcSvc *sourcemap.Service) *SourcemapHandler {
+	return &SourcemapHandler{db: db, storage: storage, srcSvc: srcSvc}
 }
 
 // UploadSourcemapResponse is returned after a successful source map upload.
@@ -120,6 +122,12 @@ func (h *SourcemapHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		projectID, release, objectKey, header.Size)
 	if err != nil {
 		log.Printf("failed to record source map in DB [key=%s]: %v", objectKey, err)
+	}
+
+	// Retroactively deobfuscate events that arrived before this source map.
+	// Runs in background to not block the upload response.
+	if h.srcSvc != nil {
+		go h.srcSvc.ResolveEventsForRelease(projectID, release)
 	}
 
 	writeJSON(w, http.StatusCreated, UploadSourcemapResponse{

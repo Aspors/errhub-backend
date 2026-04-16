@@ -49,6 +49,11 @@ func run(db *pgxpool.Pool, storage *s3.Storage) {
 		DELETE FROM sourcemap_files
 		WHERE created_at  < NOW() - INTERVAL '3 days'
 		  AND last_used_at < NOW() - INTERVAL '7 days'
+		  AND id NOT IN (
+		      SELECT DISTINCT ON (project_id) id
+		      FROM sourcemap_files
+		      ORDER BY project_id, created_at DESC
+		  )
 		RETURNING object_key`)
 	if err != nil {
 		log.Printf("cleanup: query failed: %v", err)

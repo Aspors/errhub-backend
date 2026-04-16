@@ -75,7 +75,7 @@ func NewRouter(
 	projectHandler := handler.NewProjectHandler(db)
 	issueHandler := handler.NewIssueHandler(db, srcSvc)
 	statsHandler := handler.NewStatsHandler(db)
-	sourcemapHandler := handler.NewSourcemapHandler(db, storage)
+	sourcemapHandler := handler.NewSourcemapHandler(db, storage, srcSvc)
 
 	// Swagger UI — available at /swagger/index.html
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)

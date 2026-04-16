@@ -137,7 +137,7 @@ func (h *IssueHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := h.db.Query(r.Context(), `
-		SELECT payload, created_at FROM events
+		SELECT payload, created_at, resolved_stack FROM events
 		WHERE issue_id = $1 ORDER BY created_at DESC LIMIT 10`,
 		issueID)
 	if err != nil {
@@ -151,13 +151,23 @@ func (h *IssueHandler) Get(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var raw []byte
 		var createdAt time.Time
-		if err := rows.Scan(&raw, &createdAt); err != nil {
+		var resolvedStack *string
+		if err := rows.Scan(&raw, &createdAt, &resolvedStack); err != nil {
 			log.Printf("failed to scan event row: %v", err)
 			continue
 		}
 
-		// Resolve minified stacktrace to original source positions if source maps are available.
-		if h.srcSvc != nil {
+		if resolvedStack != nil {
+			// Already deobfuscated — inject into payload without hitting MinIO.
+			var payload models.EventPayload
+			if err := json.Unmarshal(raw, &payload); err == nil {
+				payload.Error.Stacktrace = *resolvedStack
+				if reencoded, err := json.Marshal(payload); err == nil {
+					raw = reencoded
+				}
+			}
+		} else if h.srcSvc != nil {
+			// Fallback: resolve on-the-fly (sourcemap may still be in MinIO).
 			var payload models.EventPayload
 			if err := json.Unmarshal(raw, &payload); err == nil && payload.Error.Stacktrace != "" {
 				resolved := h.srcSvc.ProcessStack(r.Context(), projectID, payload.Release, payload.Error.Stacktrace)

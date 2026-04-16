@@ -67,7 +67,7 @@ func main() {
 	}
 
 	// Start async event processor: 500-event buffer, 4 worker goroutines.
-	processor := eventsvc.NewProcessor(db.Pool, rdb, 500)
+	processor := eventsvc.NewProcessor(db.Pool, rdb, srcSvc, 500)
 	processor.Start(4)
 	defer processor.Stop() // drains the queue before exit
 

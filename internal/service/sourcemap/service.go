@@ -9,6 +9,7 @@ import (
 	"log"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/Aspors/errhub-backend/internal/storage/s3"
 	"github.com/go-sourcemap/sourcemap"
@@ -110,6 +111,53 @@ func (s *Service) resolve(ctx context.Context, objectKey, projectID, release, ma
 		return fmt.Sprintf("%s:%d:%d [%s]", file, l, c, fn), nil
 	}
 	return fmt.Sprintf("%s:%d:%d", file, l, c), nil
+}
+
+// ResolveEventsForRelease retroactively deobfuscates all events for the given
+// (projectID, release) pair that don't yet have a resolved_stack. Meant to be
+// called in a goroutine right after a source map is uploaded.
+func (s *Service) ResolveEventsForRelease(projectID, release string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	rows, err := s.db.Query(ctx, `
+		SELECT id, payload#>>'{error,stacktrace}'
+		FROM events
+		WHERE project_id = $1
+		  AND payload->>'release' = $2
+		  AND resolved_stack IS NULL`,
+		projectID, release)
+	if err != nil {
+		log.Printf("sourcemap: retroactive resolve query failed [project=%s release=%s]: %v", projectID, release, err)
+		return
+	}
+	defer rows.Close()
+
+	var updated int
+	for rows.Next() {
+		var id string
+		var stack *string
+		if err := rows.Scan(&id, &stack); err != nil || stack == nil || *stack == "" {
+			continue
+		}
+
+		resolved := s.ProcessStack(ctx, projectID, release, *stack)
+		if resolved == *stack {
+			continue // sourcemap didn't change anything — skip DB write
+		}
+
+		if _, err := s.db.Exec(ctx,
+			`UPDATE events SET resolved_stack = $1 WHERE id = $2`,
+			resolved, id); err != nil {
+			log.Printf("sourcemap: failed to save resolved stack [event=%s]: %v", id, err)
+			continue
+		}
+		updated++
+	}
+
+	if updated > 0 {
+		log.Printf("sourcemap: retroactively resolved %d event(s) [project=%s release=%s]", updated, projectID, release)
+	}
 }
 
 func (s *Service) touchLastUsed(objectKey string) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Aspors/errhub-backend/internal/models"
+	"github.com/Aspors/errhub-backend/internal/service/sourcemap"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -26,17 +27,19 @@ type Job struct {
 // Processor is a fixed-size worker pool connected to a buffered job channel.
 // Call Start to launch workers, Enqueue to submit jobs, Stop to drain and exit.
 type Processor struct {
-	queue chan Job
-	db    *pgxpool.Pool
-	rdb   *redis.Client
-	wg    sync.WaitGroup
+	queue  chan Job
+	db     *pgxpool.Pool
+	rdb    *redis.Client
+	srcSvc *sourcemap.Service
+	wg     sync.WaitGroup
 }
 
-func NewProcessor(db *pgxpool.Pool, rdb *redis.Client, bufSize int) *Processor {
+func NewProcessor(db *pgxpool.Pool, rdb *redis.Client, srcSvc *sourcemap.Service, bufSize int) *Processor {
 	return &Processor{
-		queue: make(chan Job, bufSize),
-		db:    db,
-		rdb:   rdb,
+		queue:  make(chan Job, bufSize),
+		db:     db,
+		rdb:    rdb,
+		srcSvc: srcSvc,
 	}
 }
 
@@ -105,9 +108,20 @@ func (p *Processor) process(job Job) {
 		return
 	}
 
+	// Best-effort: resolve stacktrace at ingestion if sourcemap already exists.
+	// If sourcemap isn't uploaded yet, resolved_stack stays NULL and will be
+	// filled retroactively when the sourcemap arrives (see ResolveEventsForRelease).
+	var resolvedStack *string
+	if p.srcSvc != nil && job.Payload.Error.Stacktrace != "" {
+		resolved := p.srcSvc.ProcessStack(ctx, job.Payload.ProjectID, job.Payload.Release, job.Payload.Error.Stacktrace)
+		if resolved != job.Payload.Error.Stacktrace {
+			resolvedStack = &resolved
+		}
+	}
+
 	payloadBytes, _ := json.Marshal(job.Payload)
-	insertEventQuery := `INSERT INTO events (project_id, issue_id, payload) VALUES ($1, $2, $3)`
-	if _, err := p.db.Exec(ctx, insertEventQuery, job.Payload.ProjectID, issueID, payloadBytes); err != nil {
+	insertEventQuery := `INSERT INTO events (project_id, issue_id, payload, resolved_stack) VALUES ($1, $2, $3, $4)`
+	if _, err := p.db.Exec(ctx, insertEventQuery, job.Payload.ProjectID, issueID, payloadBytes, resolvedStack); err != nil {
 		log.Printf("processor: insert event failed [issue=%s]: %v", issueID, err)
 	}
 
