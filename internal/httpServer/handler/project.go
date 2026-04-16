@@ -8,15 +8,17 @@ import (
 
 	"github.com/Aspors/errhub-backend/internal/httpserver/middleware"
 	"github.com/Aspors/errhub-backend/internal/models"
+	"github.com/Aspors/errhub-backend/internal/storage/s3"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type ProjectHandler struct {
-	db *pgxpool.Pool
+	db      *pgxpool.Pool
+	storage *s3.Storage
 }
 
-func NewProjectHandler(db *pgxpool.Pool) *ProjectHandler {
-	return &ProjectHandler{db: db}
+func NewProjectHandler(db *pgxpool.Pool, storage *s3.Storage) *ProjectHandler {
+	return &ProjectHandler{db: db, storage: storage}
 }
 
 // CreateProjectRequest is the body for POST /api/projects.
@@ -152,7 +154,33 @@ func (h *ProjectHandler) Get(w http.ResponseWriter, r *http.Request) {
 func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("projectId")
 
-	result, err := h.db.Exec(r.Context(), `DELETE FROM projects WHERE id = $1`, projectID)
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// Collect sourcemap object keys before cascade delete removes the records.
+	var keys []string
+	if h.storage != nil {
+		rows, err := h.db.Query(r.Context(),
+			`SELECT object_key FROM sourcemap_files WHERE project_id = $1`, projectID)
+		if err != nil {
+			log.Printf("failed to query sourcemaps for project [id=%s]: %v", projectID, err)
+		} else {
+			for rows.Next() {
+				var key string
+				if err := rows.Scan(&key); err == nil {
+					keys = append(keys, key)
+				}
+			}
+			rows.Close()
+		}
+	}
+
+	// Delete project; AND user_id guards against accidental cross-owner deletion.
+	result, err := h.db.Exec(r.Context(),
+		`DELETE FROM projects WHERE id = $1 AND user_id = $2`, projectID, userID)
 	if err != nil {
 		log.Printf("failed to delete project [id=%s]: %v", projectID, err)
 		writeError(w, http.StatusInternalServerError, "failed to delete project")
@@ -161,6 +189,13 @@ func (h *ProjectHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if result.RowsAffected() == 0 {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
+	}
+
+	// Best-effort MinIO cleanup — DB cascade already removed sourcemap_files records.
+	if h.storage != nil && len(keys) > 0 {
+		if err := h.storage.DeleteObjects(r.Context(), keys); err != nil {
+			log.Printf("failed to delete sourcemap objects from storage [project=%s]: %v", projectID, err)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
