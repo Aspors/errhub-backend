@@ -31,6 +31,20 @@ func (db *DB) RunMigrations(databaseURL string) error {
 	return nil
 }
 
+func (db *DB) RunSeedMigrations(databaseURL string) error {
+	m, err := migrate.New("file://migrations/seed", databaseURL)
+	if err != nil {
+		return fmt.Errorf("could not create seed migrate instance: %w", err)
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return fmt.Errorf("could not run seed migrations: %w", err)
+	}
+
+	log.Println("Demo seed applied successfully!")
+	return nil
+}
+
 func New(ctx context.Context, connectionString string) (*DB, error) {
 	cfg, err := pgxpool.ParseConfig(connectionString)
 	if err != nil {

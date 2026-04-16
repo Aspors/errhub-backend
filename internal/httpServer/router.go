@@ -73,7 +73,7 @@ func NewRouter(
 	authHandler := handler.NewAuthHandler(db, jwtSecret)
 	adminHandler := handler.NewAdminHandler(db, adminKey)
 	projectHandler := handler.NewProjectHandler(db)
-	issueHandler := handler.NewIssueHandler(db, srcSvc)
+	issueHandler := handler.NewIssueHandler(db)
 	statsHandler := handler.NewStatsHandler(db)
 	sourcemapHandler := handler.NewSourcemapHandler(db, storage, srcSvc)
 

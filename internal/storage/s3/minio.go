@@ -2,6 +2,7 @@ package s3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -44,16 +45,42 @@ func (s *Storage) Upload(ctx context.Context, projectID, filename string, r io.R
 	return err
 }
 
-func (s *Storage) Download(ctx context.Context, projectID, filename string) ([]byte, error) {
-	objectName := fmt.Sprintf("%s/%s", projectID, filename)
-	object, err := s.client.GetObject(ctx, s.bucketName, objectName, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, err
-	}
-	defer object.Close()
-	return io.ReadAll(object)
+func (s *Storage) Download(ctx context.Context, objectKey string) (io.ReadCloser, error) {
+    object, err := s.client.GetObject(ctx, s.bucketName, objectKey, minio.GetObjectOptions{})
+    if err != nil {
+        return nil, fmt.Errorf("failed to get object from s3: %w", err)
+    }
+
+    return object, nil
 }
 
 func (s *Storage) Delete(ctx context.Context, objectKey string) error {
 	return s.client.RemoveObject(ctx, s.bucketName, objectKey, minio.RemoveObjectOptions{})
+}
+
+func (s *Storage) DeleteObjects(ctx context.Context, keys []string) error {
+    if len(keys) == 0 {
+        return nil
+    }
+
+    objectsCh := make(chan minio.ObjectInfo, len(keys))
+    
+    for _, key := range keys {
+        objectsCh <- minio.ObjectInfo{Key: key}
+    }
+    close(objectsCh)
+
+    opts := minio.RemoveObjectsOptions{}
+    errorCh := s.client.RemoveObjects(ctx, s.bucketName, objectsCh, opts)
+
+    var errs []error
+    for err := range errorCh {
+        errs = append(errs, fmt.Errorf("failed to delete object %q: %v", err.ObjectName, err.Err))
+    }
+
+    if len(errs) > 0 {
+        return errors.Join(errs...)
+    }
+
+    return nil
 }

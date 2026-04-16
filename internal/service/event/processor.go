@@ -1,7 +1,8 @@
 // Package event provides an async worker pool for processing incoming error events.
 // The HTTP handler validates the payload and enqueues a job immediately, so the
 // response is returned to the SDK without waiting for DB/Redis writes. Workers
-// drain the queue concurrently and persist each event.
+// accumulate jobs into a local batch and flush to DB when the batch is full or
+// a time interval elapses — whichever comes first.
 package event
 
 import (
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Aspors/errhub-backend/internal/models"
 	"github.com/Aspors/errhub-backend/internal/service/sourcemap"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
@@ -43,14 +45,42 @@ func NewProcessor(db *pgxpool.Pool, rdb *redis.Client, srcSvc *sourcemap.Service
 	}
 }
 
-// Start launches n worker goroutines. Call once at application startup.
-func (p *Processor) Start(n int) {
-	for i := 0; i < n; i++ {
+// Start launches workersCount goroutines. Each worker accumulates jobs into a
+// local batch and flushes to DB either when the batch reaches batchSize or when
+// flushInterval elapses — whichever comes first.
+func (p *Processor) Start(workersCount, batchSize int, flushInterval time.Duration) {
+	for i := 0; i < workersCount; i++ {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			for job := range p.queue {
-				p.process(job)
+
+			batch := make([]Job, 0, batchSize)
+			ticker := time.NewTicker(flushInterval)
+			defer ticker.Stop()
+
+			flush := func() {
+				if len(batch) > 0 {
+					p.flushBatch(batch)
+					batch = batch[:0]
+				}
+			}
+
+			for {
+				select {
+				case job, ok := <-p.queue:
+					if !ok {
+						// Channel closed (graceful shutdown) — flush remainder and exit.
+						flush()
+						return
+					}
+					batch = append(batch, job)
+					if len(batch) >= batchSize {
+						flush()
+						ticker.Reset(flushInterval)
+					}
+				case <-ticker.C:
+					flush()
+				}
 			}
 		}()
 	}
@@ -79,62 +109,84 @@ func (p *Processor) Enqueue(job Job) bool {
 // QueueLen returns the current number of pending jobs (useful for metrics/health).
 func (p *Processor) QueueLen() int { return len(p.queue) }
 
-func (p *Processor) process(job Job) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (p *Processor) flushBatch(jobs []Job) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	upsertQuery := `
-		INSERT INTO issues (project_id, fingerprint, level, error_type, error_message)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (project_id, fingerprint)
-		DO UPDATE SET
-			occurrences = issues.occurrences + 1,
-			last_seen   = NOW(),
-			status      = CASE WHEN issues.status = 'resolved' THEN 'open' ELSE issues.status END
-		RETURNING id, occurrences`
-
-	var issueID string
-	var occurrences int
-	err := p.db.QueryRow(ctx, upsertQuery,
-		job.Payload.ProjectID,
-		job.Fingerprint,
-		job.Payload.Level,
-		job.Payload.Error.Type,
-		job.Payload.Error.Message,
-	).Scan(&issueID, &occurrences)
+	tx, err := p.db.Begin(ctx)
 	if err != nil {
-		log.Printf("processor: upsert issue failed [project=%s hash=%s]: %v",
-			job.Payload.ProjectID, job.Fingerprint, err)
+		log.Printf("processor: failed to begin tx: %v", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Step 1: batch upsert issues — one round-trip for all jobs.
+	issueBatch := &pgx.Batch{}
+	for _, job := range jobs {
+		issueBatch.Queue(`
+			INSERT INTO issues (project_id, fingerprint, level, error_type, error_message)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (project_id, fingerprint) DO UPDATE SET
+				occurrences = issues.occurrences + 1,
+				last_seen   = NOW(),
+				status      = CASE WHEN issues.status = 'resolved' THEN 'open' ELSE issues.status END
+			RETURNING id`,
+			job.Payload.ProjectID, job.Fingerprint,
+			job.Payload.Level, job.Payload.Error.Type, job.Payload.Error.Message,
+		)
+	}
+
+	brIssues := tx.SendBatch(ctx, issueBatch)
+	issueIDs := make([]string, len(jobs))
+	for i := range jobs {
+		if err := brIssues.QueryRow().Scan(&issueIDs[i]); err != nil {
+			log.Printf("processor: batch upsert issue failed at index %d: %v", i, err)
+			brIssues.Close()
+			return
+		}
+	}
+	brIssues.Close()
+
+	// Step 2: batch insert events.
+	// Sourcemap resolution is intentionally skipped here — a slow S3 read would
+	// stall the entire batch. resolved_stack is filled retroactively when a
+	// sourcemap is uploaded (see sourcemap.Service.ResolveEventsForRelease).
+	eventBatch := &pgx.Batch{}
+	for i, job := range jobs {
+		payloadBytes, err := json.Marshal(job.Payload)
+		if err != nil {
+			log.Printf("processor: json marshal failed at index %d: %v", i, err)
+			return
+		}
+		eventBatch.Queue(
+			`INSERT INTO events (project_id, issue_id, payload) VALUES ($1, $2, $3)`,
+			job.Payload.ProjectID, issueIDs[i], payloadBytes,
+		)
+	}
+
+	brEvents := tx.SendBatch(ctx, eventBatch)
+	for i := range jobs {
+		if _, err := brEvents.Exec(); err != nil {
+			log.Printf("processor: batch insert event failed at index %d: %v", i, err)
+			brEvents.Close()
+			return
+		}
+	}
+	brEvents.Close()
+
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("processor: batch commit failed: %v", err)
 		return
 	}
 
-	// Best-effort: resolve stacktrace at ingestion if sourcemap already exists.
-	// If sourcemap isn't uploaded yet, resolved_stack stays NULL and will be
-	// filled retroactively when the sourcemap arrives (see ResolveEventsForRelease).
-	var resolvedStack *string
-	if p.srcSvc != nil && job.Payload.Error.Stacktrace != "" {
-		resolved := p.srcSvc.ProcessStack(ctx, job.Payload.ProjectID, job.Payload.Release, job.Payload.Error.Stacktrace)
-		if resolved != job.Payload.Error.Stacktrace {
-			resolvedStack = &resolved
-		}
-	}
-
-	payloadBytes, _ := json.Marshal(job.Payload)
-	insertEventQuery := `INSERT INTO events (project_id, issue_id, payload, resolved_stack) VALUES ($1, $2, $3, $4)`
-	if _, err := p.db.Exec(ctx, insertEventQuery, job.Payload.ProjectID, issueID, payloadBytes, resolvedStack); err != nil {
-		log.Printf("processor: insert event failed [issue=%s]: %v", issueID, err)
-	}
-
-	// Sync Redis counter with DB value (best-effort).
-	redisKey := fmt.Sprintf("issue:%s:count", job.Fingerprint)
+	// Step 3: Redis pipeline after successful commit — best-effort, non-critical.
 	pipe := p.rdb.Pipeline()
-	pipe.Set(ctx, redisKey, occurrences, 30*24*time.Hour)
+	for _, job := range jobs {
+		pipe.Incr(ctx, fmt.Sprintf("issue:%s:count", job.Fingerprint))
+	}
 	if _, err := pipe.Exec(ctx); err != nil {
-		log.Printf("processor: redis sync failed [key=%s]: %v", redisKey, err)
+		log.Printf("processor: redis pipeline failed: %v", err)
 	}
 
-	if occurrences == 1 {
-		log.Printf("new issue [project=%s type=%s hash=%.8s]",
-			job.Payload.ProjectID, job.Payload.Error.Type, job.Fingerprint)
-	}
+	log.Printf("processor: flushed batch of %d event(s)", len(jobs))
 }

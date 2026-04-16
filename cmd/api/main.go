@@ -35,6 +35,13 @@ func main() {
 	if err := db.RunMigrations(cfg.DatabaseURL); err != nil {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
+
+	if cfg.SeedDemo {
+		if err := db.RunSeedMigrations(cfg.DatabaseURL); err != nil {
+			log.Fatalf("failed to run seed migrations: %v", err)
+		}
+	}
+
 	log.Println("connected to PostgreSQL")
 
 	redisCtx, redisCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -68,7 +75,7 @@ func main() {
 
 	// Start async event processor: 500-event buffer, 4 worker goroutines.
 	processor := eventsvc.NewProcessor(db.Pool, rdb, srcSvc, 500)
-	processor.Start(4)
+	processor.Start(4, 100, time.Second)
 	defer processor.Stop() // drains the queue before exit
 
 	router := httpserver.NewRouter(db.Pool, rdb, processor, storage, srcSvc, cfg.JWTSecret, cfg.AdminKey, cfg.CORSOrigins)

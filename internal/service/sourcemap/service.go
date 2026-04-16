@@ -6,6 +6,7 @@ package sourcemap
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"regexp"
 	"strconv"
@@ -79,13 +80,12 @@ func (s *Service) resolve(ctx context.Context, objectKey, projectID, release, ma
 		consumer = val
 	} else {
 		// Download using the full object key path.
-		var data []byte
-		var err error
-		if release != "" {
-			data, err = s.s3.Download(ctx, projectID+"/"+release, mapFile)
-		} else {
-			data, err = s.s3.Download(ctx, projectID, mapFile)
+		rc, err := s.s3.Download(ctx, objectKey)
+		if err != nil {
+			return "", err
 		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
 		if err != nil {
 			return "", err
 		}

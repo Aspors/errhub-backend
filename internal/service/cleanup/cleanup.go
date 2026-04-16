@@ -26,14 +26,14 @@ func Start(ctx context.Context, db *pgxpool.Pool, storage *s3.Storage) {
 		case <-ctx.Done():
 			return
 		}
-		run(db, storage)
+		run(ctx, db, storage)
 
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				run(db, storage)
+				run(ctx, db, storage)
 			case <-ctx.Done():
 				return
 			}
@@ -41,12 +41,13 @@ func Start(ctx context.Context, db *pgxpool.Pool, storage *s3.Storage) {
 	}()
 }
 
-func run(db *pgxpool.Pool, storage *s3.Storage) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+func run(parentCtx context.Context, db *pgxpool.Pool, storage *s3.Storage) {
+	ctx, cancel := context.WithTimeout(parentCtx, 10*time.Minute)
 	defer cancel()
 
 	rows, err := db.Query(ctx, `
-		DELETE FROM sourcemap_files
+		SELECT id, object_key
+		FROM sourcemap_files
 		WHERE created_at  < NOW() - INTERVAL '3 days'
 		  AND last_used_at < NOW() - INTERVAL '7 days'
 		  AND id NOT IN (
@@ -54,27 +55,39 @@ func run(db *pgxpool.Pool, storage *s3.Storage) {
 		      FROM sourcemap_files
 		      ORDER BY project_id, created_at DESC
 		  )
-		RETURNING object_key`)
+		LIMIT 1000`)
 	if err != nil {
 		log.Printf("cleanup: query failed: %v", err)
 		return
 	}
-	defer rows.Close()
 
-	var deleted int
+	var ids []string
+	var keys []string
 	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
+		var id, key string
+		if err := rows.Scan(&id, &key); err != nil {
 			continue
 		}
-		if err := storage.Delete(ctx, key); err != nil {
-			log.Printf("cleanup: failed to delete object [key=%s]: %v", key, err)
-			continue
-		}
-		deleted++
+		ids = append(ids, id)
+		keys = append(keys, key)
+	}
+	rows.Close()
+
+	if len(ids) == 0 {
+		return
 	}
 
-	if deleted > 0 {
-		log.Printf("cleanup: removed %d stale source map(s)", deleted)
+	// Batch delete from MinIO in a single request.
+	// On any error we skip the DB cleanup so records stay for the next cycle.
+	if err := storage.DeleteObjects(ctx, keys); err != nil {
+		log.Printf("cleanup: batch delete failed, will retry next cycle: %v", err)
+		return
 	}
+
+	if _, err := db.Exec(ctx, `DELETE FROM sourcemap_files WHERE id = ANY($1)`, ids); err != nil {
+		log.Printf("cleanup: failed to remove records from DB: %v", err)
+		return
+	}
+
+	log.Printf("cleanup: removed %d stale source map(s)", len(ids))
 }

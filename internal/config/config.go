@@ -21,6 +21,7 @@ type Config struct {
 	MinioSecretKey string
 	MinioBucket    string
 	CORSOrigins    []string
+	SeedDemo       bool
 }
 
 func LoadEnv() *Config {
@@ -86,5 +87,6 @@ func LoadEnv() *Config {
 		MinioSecretKey: os.Getenv("MINIO_PASSWORD"),
 		MinioBucket:    minioBucket,
 		CORSOrigins:    corsOrigins,
+		SeedDemo:       os.Getenv("SEED_DEMO") == "true",
 	}
 }

@@ -8,17 +8,15 @@ import (
 	"time"
 
 	"github.com/Aspors/errhub-backend/internal/models"
-	"github.com/Aspors/errhub-backend/internal/service/sourcemap"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type IssueHandler struct {
-	db     *pgxpool.Pool
-	srcSvc *sourcemap.Service
+	db *pgxpool.Pool
 }
 
-func NewIssueHandler(db *pgxpool.Pool, srcSvc *sourcemap.Service) *IssueHandler {
-	return &IssueHandler{db: db, srcSvc: srcSvc}
+func NewIssueHandler(db *pgxpool.Pool) *IssueHandler {
+	return &IssueHandler{db: db}
 }
 
 // IssueListResponse wraps a paginated list of issues.
@@ -30,9 +28,12 @@ type IssueListResponse struct {
 }
 
 // IssueEventRow is a single raw event occurrence attached to an issue.
+// ResolvedStack is non-nil when the stack trace has been deobfuscated; the
+// frontend should prefer it over the minified stacktrace inside Payload.
 type IssueEventRow struct {
-	Payload   interface{} `json:"payload"`
-	CreatedAt string      `json:"created_at" example:"2024-01-15T10:30:00Z"`
+	Payload       json.RawMessage `json:"payload"`
+	ResolvedStack *string         `json:"resolved_stack"`
+	CreatedAt     string          `json:"created_at" example:"2024-01-15T10:30:00Z"`
 }
 
 // IssueDetailResponse combines the issue with its recent event occurrences.
@@ -64,10 +65,22 @@ func (h *IssueHandler) List(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("projectId")
 	limit, offset := parsePagination(r, 50, 200)
 
+	// Run count and data queries in parallel to avoid COUNT(*) OVER() full scan.
+	type countResult struct {
+		n   int64
+		err error
+	}
+	countCh := make(chan countResult, 1)
+	go func() {
+		var n int64
+		err := h.db.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM issues WHERE project_id = $1`, projectID).Scan(&n)
+		countCh <- countResult{n, err}
+	}()
+
 	rows, err := h.db.Query(r.Context(), `
 		SELECT id, project_id, fingerprint, level, error_type, error_message,
-		       occurrences, first_seen, last_seen, status,
-		       COUNT(*) OVER() as total
+		       occurrences, first_seen, last_seen, status
 		FROM issues
 		WHERE project_id = $1
 		ORDER BY last_seen DESC
@@ -81,24 +94,34 @@ func (h *IssueHandler) List(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	issues := make([]models.Issue, 0)
-	var total int64
 	for rows.Next() {
 		var issue models.Issue
 		if err := rows.Scan(
 			&issue.ID, &issue.ProjectID, &issue.Fingerprint,
 			&issue.Level, &issue.ErrorType, &issue.ErrorMessage,
 			&issue.Occurrences, &issue.FirstSeen, &issue.LastSeen, &issue.Status,
-			&total,
 		); err != nil {
 			log.Printf("failed to scan issue row: %v", err)
 			continue
 		}
 		issues = append(issues, issue)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("failed to iterate issue rows [project=%s]: %v", projectID, err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch issues")
+		return
+	}
+
+	cr := <-countCh
+	if cr.err != nil {
+		log.Printf("failed to count issues [project=%s]: %v", projectID, cr.err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch issues")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, IssueListResponse{
 		Items:  issues,
-		Total:  total,
+		Total:  cr.n,
 		Limit:  limit,
 		Offset: offset,
 	})
@@ -149,36 +172,23 @@ func (h *IssueHandler) Get(w http.ResponseWriter, r *http.Request) {
 
 	events := make([]IssueEventRow, 0)
 	for rows.Next() {
-		var raw []byte
+		var raw json.RawMessage
 		var createdAt time.Time
 		var resolvedStack *string
 		if err := rows.Scan(&raw, &createdAt, &resolvedStack); err != nil {
 			log.Printf("failed to scan event row: %v", err)
 			continue
 		}
-
-		if resolvedStack != nil {
-			// Already deobfuscated — inject into payload without hitting MinIO.
-			var payload models.EventPayload
-			if err := json.Unmarshal(raw, &payload); err == nil {
-				payload.Error.Stacktrace = *resolvedStack
-				if reencoded, err := json.Marshal(payload); err == nil {
-					raw = reencoded
-				}
-			}
-		} else if h.srcSvc != nil {
-			// Fallback: resolve on-the-fly (sourcemap may still be in MinIO).
-			var payload models.EventPayload
-			if err := json.Unmarshal(raw, &payload); err == nil && payload.Error.Stacktrace != "" {
-				resolved := h.srcSvc.ProcessStack(r.Context(), projectID, payload.Release, payload.Error.Stacktrace)
-				payload.Error.Stacktrace = resolved
-				if reencoded, err := json.Marshal(payload); err == nil {
-					raw = reencoded
-				}
-			}
-		}
-
-		events = append(events, IssueEventRow{Payload: json.RawMessage(raw), CreatedAt: createdAt.UTC().Format(time.RFC3339)})
+		events = append(events, IssueEventRow{
+			Payload:       raw,
+			ResolvedStack: resolvedStack,
+			CreatedAt:     createdAt.UTC().Format(time.RFC3339),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("failed to iterate event rows [issue=%s]: %v", issueID, err)
+		writeError(w, http.StatusInternalServerError, "failed to fetch events")
+		return
 	}
 
 	writeJSON(w, http.StatusOK, IssueDetailResponse{Issue: issue, Events: events})
